@@ -4,12 +4,13 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include "worker.c"
 
-// Estructuras necesarias
 typedef struct {
     uint16_t type;
     uint32_t size;
-    uint32_t reserved;
+    uint16_t reserved1;
+    uint16_t reserved2;
     uint32_t offset;
 } BMPHeader;
 
@@ -21,58 +22,74 @@ typedef struct {
     uint16_t bit_count;
     uint32_t compression;
     uint32_t size_image;
-    int32_t x_pels_per_meter;
-    int32_t y_pels_per_meter;
-    uint32_t clr_used;
-    uint32_t clr_important;
+    int32_t x_pixels_per_meter;
+    int32_t y_pixels_per_meter;
+    uint32_t colors_used;
+    uint32_t colors_important;
 } BMPInfoHeader;
 
 typedef struct {
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
+    unsigned char r;
+    unsigned char g;
+    unsigned char b;
 } RGBPixel;
 
 typedef struct {
-    BMPHeader header;
-    BMPInfoHeader info_header;
-    RGBPixel* data;
+    int width;
+    int height;
+    RGBPixel *data;
 } BMPImage;
 
 void send_image_fragment(int fd, BMPImage* image, int start_col, int end_col) {
     int fragment_width = end_col - start_col;
-    int fragment_size = fragment_width * image->info_header.height * sizeof(RGBPixel);
-    
+    int fragment_size = fragment_width * image->width * sizeof(RGBPixel); // Utilizamos image->width
+
     // Enviar la cabecera
-    write(fd, &image->info_header, sizeof(BMPInfoHeader));
+    BMPInfoHeader info_header = {
+        .size = sizeof(BMPInfoHeader),
+        .width = fragment_width, // Ancho del fragmento
+        .height = image->height, // Alto de la imagen completa
+        .planes = 1,
+        .bit_count = 24, // Asumiendo formato BMP de 24 bits
+        .compression = 0,
+        .size_image = fragment_size, // Tamaño del fragmento
+        .x_pixels_per_meter = 0,
+        .y_pixels_per_meter = 0,
+        .colors_used = 0,
+        .colors_important = 0
+    };
+
+    write(fd, &info_header, sizeof(BMPInfoHeader));
 
     // Enviar los datos del fragmento
-    for (int y = 0; y < image->info_header.height; y++) {
-        write(fd, &image->data[y * image->info_header.width + start_col], fragment_width * sizeof(RGBPixel));
+    for (int y = 0; y < image->height; y++) {
+        write(fd, &image->data[y * image->width + start_col], fragment_width * sizeof(RGBPixel));
     }
 }
 
 BMPImage* receive_image_fragment(int fd, int width, int height) {
     BMPImage* fragment = (BMPImage*)malloc(sizeof(BMPImage));
-    fragment->info_header.width = width;
-    fragment->info_header.height = height;
+    fragment->width = width;
+    fragment->height = height;
     fragment->data = (RGBPixel*)malloc(width * height * sizeof(RGBPixel));
-    
-    read(fd, &fragment->info_header, sizeof(BMPInfoHeader));
+
+    BMPInfoHeader info_header;
+    read(fd, &info_header, sizeof(BMPInfoHeader)); // Leemos la cabecera del fragmento
+
     for (int y = 0; y < height; y++) {
         read(fd, &fragment->data[y * width], width * sizeof(RGBPixel));
     }
-    
+
     return fragment;
 }
 
 void assemble_image(BMPImage* image, BMPImage** fragments, int num_fragments) {
-    int fragment_width = image->info_header.width / num_fragments;
+    int fragment_width = image->width / num_fragments;
     int current_col = 0;
 
     for (int i = 0; i < num_fragments; i++) {
-        for (int y = 0; y < image->info_header.height; y++) {
-            memcpy(&image->data[y * image->info_header.width + current_col], 
+        for (int y = 0; y < image->height; y++) {
+            memcpy(&image->data[y * image->width + current_col], 
                    &fragments[i]->data[y * fragment_width], 
                    fragment_width * sizeof(RGBPixel));
         }
@@ -81,6 +98,11 @@ void assemble_image(BMPImage* image, BMPImage** fragments, int num_fragments) {
 }
 
 int main(int argc, char *argv[]) {
+    if (argc != 9) {
+        fprintf(stderr, "Uso: %s <nombre_archivo.bmp> <f> <p> <u> <v> <W> <C> <R>\n", argv[0]);
+        exit(1);
+    }
+
     char* N = argv[1];
     int f = atoi(argv[2]);
     float p = atof(argv[3]);
@@ -92,14 +114,13 @@ int main(int argc, char *argv[]) {
     strcpy(C, argv[7]);
     strcpy(R, argv[8]);
 
-    int status = 0;
     BMPImage* image = read_bmp(N);
     if (!image) {
         exit(1);
     }
 
-    int columns_per_worker = image->info_header.width / W;
-    int remaining_columns = image->info_header.width % W;
+    int columns_per_worker = image->width / W;
+    int remaining_columns = image->width % W;
 
     pid_t workers[W];
     int pipes[W][2];
@@ -136,9 +157,10 @@ int main(int argc, char *argv[]) {
 
     BMPImage* fragments[W];
     for (int i = 0; i < W; i++) {
+        int status = 0;
         waitpid(workers[i], &status, 0);
         if (WIFEXITED(status)) {
-            fragments[i] = receive_image_fragment(pipes[i][0], columns_per_worker, image->info_header.height);
+            fragments[i] = receive_image_fragment(pipes[i][0], columns_per_worker, image->height);
         }
     }
 

@@ -160,20 +160,41 @@ void create_csv(const char* filename, char** image_names, int* classifications, 
     fclose(file);
 }
 
+void free_bmp(BMPImage* image) {
+    if (image) {
+        free(image->data);
+        free(image);
+    }
+}
+
 BMPImage* receive_image_from_pipe(int fd) {
     BMPImage* image = (BMPImage*)malloc(sizeof(BMPImage));
-    read(fd, &image->info_header, sizeof(BMPInfoHeader));
-    image->data = (RGBPixel*)malloc(image->info_header.size_image);
-    read(fd, image->data, image->info_header.size_image);
+    read(fd, &image->width, sizeof(int)); // Leer el ancho de la imagen
+    read(fd, &image->height, sizeof(int)); // Leer el alto de la imagen
+    
+    // Calcular el tamaño de los datos de píxeles
+    int data_size = image->width * image->height * sizeof(RGBPixel);
+    
+    // Asignar memoria para los datos de píxeles
+    image->data = (RGBPixel*)malloc(data_size);
+    
+    // Leer los datos de píxeles desde el pipe
+    read(fd, image->data, data_size);
+    
     return image;
 }
 
 void send_image_to_pipe(int fd, BMPImage* image) {
-    write(fd, &image->info_header, sizeof(BMPInfoHeader));
-    write(fd, image->data, image->info_header.size_image);
+    // Escribir el ancho y alto de la imagen
+    write(fd, &image->width, sizeof(int));
+    write(fd, &image->height, sizeof(int));
+    
+    // Escribir los datos de píxeles
+    int data_size = image->width * image->height * sizeof(RGBPixel);
+    write(fd, image->data, data_size);
 }
 
-void free_bmp(BMPImage* image);
+
 
 int main() {
     BMPImage* image = receive_image_from_pipe(STDIN_FILENO);
